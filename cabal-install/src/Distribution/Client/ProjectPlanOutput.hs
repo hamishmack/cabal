@@ -52,6 +52,7 @@ import qualified Distribution.Compat.Binary as Binary
 import           Distribution.Simple.Utils
 import           Distribution.Types.Version
                    ( mkVersion )
+import           Distribution.Types.ComponentName
 import           Distribution.Verbosity
 
 import Prelude ()
@@ -78,19 +79,20 @@ import Distribution.Simple.Program.GHC (packageDbArgsDb)
 writePlanExternalRepresentation :: DistDirLayout
                                 -> ElaboratedInstallPlan
                                 -> ElaboratedSharedConfig
+                                -> Map (PackageId, ComponentName) [AvailableTarget (UnitId, ComponentName)]
                                 -> IO ()
 writePlanExternalRepresentation distDirLayout elaboratedInstallPlan
-                                elaboratedSharedConfig =
+                                elaboratedSharedConfig availableTargets =
     writeFileAtomic (distProjectCacheFile distDirLayout "plan.json") $
         BB.toLazyByteString
       . J.encodeToBuilder
-      $ encodePlanAsJson distDirLayout elaboratedInstallPlan elaboratedSharedConfig
+      $ encodePlanAsJson distDirLayout elaboratedInstallPlan elaboratedSharedConfig availableTargets
 
 -- | Renders a subset of the elaborated install plan in a semi-stable JSON
 -- format.
 --
-encodePlanAsJson :: DistDirLayout -> ElaboratedInstallPlan -> ElaboratedSharedConfig -> J.Value
-encodePlanAsJson distDirLayout elaboratedInstallPlan elaboratedSharedConfig =
+encodePlanAsJson :: DistDirLayout -> ElaboratedInstallPlan -> ElaboratedSharedConfig -> Map (PackageId, ComponentName) [AvailableTarget (UnitId, ComponentName)] -> J.Value
+encodePlanAsJson distDirLayout elaboratedInstallPlan elaboratedSharedConfig availableTargets =
     --TODO: [nice to have] include all of the sharedPackageConfig and all of
     --      the parts of the elaboratedInstallPlan
     J.object [ "cabal-version"     J..= jdisplay cabalInstallVersion
@@ -100,6 +102,7 @@ encodePlanAsJson distDirLayout elaboratedInstallPlan elaboratedSharedConfig =
              , "os"                J..= jdisplay os
              , "arch"              J..= jdisplay arch
              , "install-plan"      J..= installPlanToJ elaboratedInstallPlan
+             , "targets"           J..= targetsToJ availableTargets
              ]
   where
     plat :: Platform
@@ -107,6 +110,32 @@ encodePlanAsJson distDirLayout elaboratedInstallPlan elaboratedSharedConfig =
 
     installPlanToJ :: ElaboratedInstallPlan -> [J.Value]
     installPlanToJ = map planPackageToJ . InstallPlan.toList
+
+    targetsToJ :: Map (PackageId, ComponentName) [AvailableTarget (UnitId, ComponentName)] -> [J.Value]
+    targetsToJ = map targetToJ . Map.toList
+
+    targetToJ :: ((PackageId, ComponentName), [AvailableTarget (UnitId, ComponentName)]) -> J.Value
+    targetToJ ((pkgId, componentName), targets) =
+      J.object
+        [ "pkg-name"       J..= jdisplay (pkgName pkgId)
+        , "pkg-version"    J..= jdisplay (pkgVersion pkgId)
+        , "component-name" J..= jdisplay componentName
+        , "available"      J..= map avaialbeTargetToJ targets
+        ]
+
+    avaialbeTargetToJ :: AvailableTarget (UnitId, ComponentName) -> J.Value
+    avaialbeTargetToJ target =
+      case availableTargetStatus target of
+        TargetDisabledByUser   -> J.String "TargetDisabledByUser"
+        TargetDisabledBySolver -> J.String "TargetDisabledBySolver"
+        TargetNotBuildable     -> J.String "TargetNotBuildable"
+        TargetNotLocal         -> J.String "TargetNotLocal"
+        TargetBuildable (unitId, componentName) requested ->
+          J.object
+            [ "id"               J..= jdisplay unitId
+            , "component-name"   J..= jdisplay componentName
+            , "build-by-default" J..= (requested == TargetRequestedByDefault)
+            ]
 
     planPackageToJ :: ElaboratedPlanPackage -> J.Value
     planPackageToJ pkg =

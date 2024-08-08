@@ -2,6 +2,7 @@
 {-# LANGUAGE DeriveDataTypeable #-}
 {-# LANGUAGE NamedFieldPuns #-}
 {-# LANGUAGE TypeFamilies #-}
+{-# LANGUAGE DeriveFunctor #-}
 
 -- | Types used while planning how to build everything in a project.
 --
@@ -53,6 +54,10 @@ module Distribution.Client.ProjectPlanning.Types (
     isExeComponentTarget,
     isTestComponentTarget,
     isBenchComponentTarget,
+
+    AvailableTarget(..),
+    AvailableTargetStatus(..),
+    TargetRequested(..),
 
     componentOptionalStanza,
 
@@ -821,6 +826,70 @@ isExeComponentTarget _                                 = False
 isSubLibComponentTarget :: ComponentTarget -> Bool
 isSubLibComponentTarget (ComponentTarget (CLibName (LSubLibName _)) _) = True
 isSubLibComponentTarget _                                              = False
+
+-- One step in the build system is to translate higher level intentions like
+-- "build this package", "test that package", or "repl that component" into
+-- a more detailed specification of exactly which components to build (or other
+-- actions like repl or build docs). This translation is somewhat different for
+-- different commands. For example "test" for a package will build a different
+-- set of components than "build". In addition, the translation of these
+-- intentions can fail. For example "run" for a package is only unambiguous
+-- when the package has a single executable.
+--
+-- So we need a little bit of infrastructure to make it easy for the command
+-- implementations to select what component targets are meant when a user asks
+-- to do something with a package or component. To do this (and to be able to
+-- produce good error messages for mistakes and when targets are not available)
+-- we need to gather and summarise accurate information about all the possible
+-- targets, both available and unavailable. Then a command implementation can
+-- decide which of the available component targets should be selected.
+
+-- | An available target represents a component within a package that a user
+-- command could plausibly refer to. In this sense, all the components defined
+-- within the package are things the user could refer to, whether or not it
+-- would actually be possible to build that component.
+--
+-- In particular the available target contains an 'AvailableTargetStatus' which
+-- informs us about whether it's actually possible to select this component to
+-- be built, and if not why not. This detail makes it possible for command
+-- implementations (like @build@, @test@ etc) to accurately report why a target
+-- cannot be used.
+--
+-- Note that the type parameter is used to help enforce that command
+-- implementations can only select targets that can actually be built (by
+-- forcing them to return the @k@ value for the selected targets).
+-- In particular 'resolveTargets' makes use of this (with @k@ as
+-- @('UnitId', ComponentName')@) to identify the targets thus selected.
+--
+data AvailableTarget k = AvailableTarget {
+       availableTargetPackageId      :: PackageId,
+       availableTargetComponentName  :: ComponentName,
+       availableTargetStatus         :: AvailableTargetStatus k,
+       availableTargetLocalToProject :: Bool
+     }
+  deriving (Eq, Show, Functor)
+
+-- | The status of a an 'AvailableTarget' component. This tells us whether
+-- it's actually possible to select this component to be built, and if not
+-- why not.
+--
+data AvailableTargetStatus k =
+       TargetDisabledByUser   -- ^ When the user does @tests: False@
+     | TargetDisabledBySolver -- ^ When the solver could not enable tests
+     | TargetNotBuildable     -- ^ When the component has @buildable: False@
+     | TargetNotLocal         -- ^ When the component is non-core in a non-local package
+     | TargetBuildable k TargetRequested -- ^ The target can or should be built
+  deriving (Eq, Ord, Show, Functor)
+
+-- | This tells us whether a target ought to be built by default, or only if
+-- specifically requested. The policy is that components like libraries and
+-- executables are built by default by @build@, but test suites and benchmarks
+-- are not, unless this is overridden in the project configuration.
+--
+data TargetRequested =
+       TargetRequestedByDefault    -- ^ To be built by default
+     | TargetNotRequestedByDefault -- ^ Not to be built by default
+  deriving (Eq, Ord, Show)
 
 componentOptionalStanza :: CD.Component -> Maybe OptionalStanza
 componentOptionalStanza (CD.ComponentTest _)  = Just TestStanzas
